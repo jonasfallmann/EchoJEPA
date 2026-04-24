@@ -19,3 +19,6 @@ model_data/
 *.zip
 *.tar
 *.gz
+
+*.png
+.idea

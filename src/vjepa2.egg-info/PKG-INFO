@@ -4,7 +4,6 @@ Version: 0.0.1
 Summary: PyTorch code and models for V-JEPA 2.
 Home-page: https://github.com/facebookresearch/vjepa2
 Requires-Python: >=3.11
-License-File: LICENSE
 Requires-Dist: torch>=2
 Requires-Dist: torchvision
 Requires-Dist: tensorboard
@@ -31,7 +30,6 @@ Requires-Dist: scikit-image
 Requires-Dist: ftfy
 Requires-Dist: jupyter
 Dynamic: home-page
-Dynamic: license-file
 Dynamic: requires-dist
 Dynamic: requires-python
 Dynamic: summary

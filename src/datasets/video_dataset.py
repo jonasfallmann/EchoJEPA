@@ -172,7 +172,7 @@ class VideoDataset(torch.utils.data.Dataset):
             raise ValueError(f"Must specify exactly one of either {fps=}, {duration=}, or {frame_step=}.")
 
         if isinstance(data_paths, str):
-            data_paths = [data_paths]
+            self.data_paths = [data_paths]
 
         if dataset_fpcs is None:
             self.dataset_fpcs = [frames_per_clip for _ in data_paths]

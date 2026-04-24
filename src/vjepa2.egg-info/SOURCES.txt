@@ -1,4 +1,3 @@
-LICENSE
 README.md
 pyproject.toml
 setup.py
@@ -23,6 +22,7 @@ src/masks/multiseq_multiblock3d.py
 src/masks/utils.py
 src/models/ac_predictor.py
 src/models/attentive_pooler.py
+src/models/linear_pooler.py
 src/models/predictor.py
 src/models/vision_transformer.py
 src/models/utils/modules.py
