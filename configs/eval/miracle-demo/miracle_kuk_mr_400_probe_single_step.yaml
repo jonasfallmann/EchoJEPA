@@ -1,6 +1,6 @@
 app: vjepa
 cpus_per_task: 32
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step
+folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_224
 mem_per_gpu: 80G
 nodes: 1
 tasks_per_node: 1

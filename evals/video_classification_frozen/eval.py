@@ -41,6 +41,7 @@ from src.utils.logging import AverageMeter, CSVLogger
 
 import os
 import tempfile  # <-- ADD THIS
+import wandb  # <--- WANDB IMPORT ADDED HERE
 
 # Fix for "AF_UNIX path too long" error
 short_tmp = "/tmp/vjepa_run"
@@ -61,6 +62,7 @@ torch.backends.cudnn.benchmark = True
 
 pp = pprint.PrettyPrinter(indent=4)
 
+
 # --- INSERT THIS CLASS IN eval.py ---
 class FocalLoss(torch.nn.Module):
     def __init__(self, alpha=1.0, gamma=2.0, reduction='mean'):
@@ -75,23 +77,24 @@ class FocalLoss(torch.nn.Module):
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = (self.alpha * (1 - pt) ** self.gamma * ce_loss)
-        
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
             return focal_loss.sum()
         else:
             return focal_loss
+
+
 # ------------------------------------
 
 def main(args_eval, resume_preempt=False):
-
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
     # ----------------------------------------------------------------------- #
 
     import os
-    
+
     # Helper to safe-set nested keys with type conversion
     def set_override(env_var, target_dict, key, type_func=str):
         val = os.environ.get(env_var)
@@ -164,7 +167,7 @@ def main(args_eval, resume_preempt=False):
     probe_checkpoint = args_eval.get("probe_checkpoint", None)
 
     # -- REGRESSION
-    task_type = args_classifier.get("task_type", "classification")  # "classification" or "regression"  
+    task_type = args_classifier.get("task_type", "classification")  # "classification" or "regression"
     num_targets = args_classifier.get("num_targets", None)  # Only for regression
     probe_type = args_classifier.get("probe_type", "attentive")  # "attentive", "linear", or "mlp"
     use_layernorm = args_classifier.get("use_layernorm", True)
@@ -183,7 +186,7 @@ def main(args_eval, resume_preempt=False):
     duration = args_data.get("clip_duration", None)
     num_views_per_segment = args_data.get("num_views_per_segment", 1)
     normalization = args_data.get("normalization", None)
-    
+
     # --- NEW: Get Mean/Std from config ---
     target_mean = args_data.get("target_mean", None)
     target_std = args_data.get("target_std", None)
@@ -222,25 +225,35 @@ def main(args_eval, resume_preempt=False):
     world_size, rank = init_distributed()
     logger.info(f"Initialized (rank/world-size) {rank}/{world_size}")
 
-    # -- log/checkpointing paths  
-    folder = os.path.join(pretrain_folder, "video_classification_frozen/")  
-    if eval_tag is not None:  
-        folder = os.path.join(folder, eval_tag)  
-    if not os.path.exists(folder):  
-        os.makedirs(folder, exist_ok=True)  
-    log_file = os.path.join(folder, f"log_r{rank}.csv")  
-      
-    # Use custom probe checkpoint if specified, otherwise use default  
-    if probe_checkpoint is not None:  
-        latest_path = probe_checkpoint  
-    else:  
+    # <--- WANDB INITIALIZATION ADDED HERE --->
+    if rank == 0:
+        wandb_run_name = eval_tag if eval_tag else f"eval_{task_type}"
+        wandb.init(
+            project="miracle-video-classification-existing-methods",  # Change this to your preferred project name
+            name=wandb_run_name,
+            config=args_eval,
+            resume="allow" if resume_preempt else None
+        )
+
+    # -- log/checkpointing paths
+    folder = os.path.join(pretrain_folder, "video_classification_frozen/")
+    if eval_tag is not None:
+        folder = os.path.join(folder, eval_tag)
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+    log_file = os.path.join(folder, f"log_r{rank}.csv")
+
+    # Use custom probe checkpoint if specified, otherwise use default
+    if probe_checkpoint is not None:
+        latest_path = probe_checkpoint
+    else:
         latest_path = os.path.join(folder, "latest.pt")
 
     # -- make csv_logger
-    if rank == 0:  
-        if task_type == "regression":  
+    if rank == 0:
+        if task_type == "regression":
             csv_logger = CSVLogger(log_file, ("%d", "epoch"), ("%.5f", "train_mae"), ("%.5f", "val_mae"))
-        else:  # classification  
+        else:  # classification
             csv_logger = CSVLogger(log_file, ("%d", "epoch"), ("%.5f", "train_acc"), ("%.5f", "val_acc"))
 
     # Initialize model
@@ -319,19 +332,18 @@ def main(args_eval, resume_preempt=False):
         ).to(device)
         for _ in opt_kwargs
     ]
-    
+
     logger.info(f"Initialized {len(classifiers)} {probe_type} probes for {task_type}")
 
-    
     # classifiers = [DistributedDataParallel(c, static_graph=True) for c in classifiers
-    # Add distributed check to avoid DDP crash when running concurrent jobs  
-    from torch import distributed as dist  
-    use_ddp = dist.is_available() and dist.is_initialized() and world_size > 1  
-    if use_ddp:  
-        classifiers = [DistributedDataParallel(c, static_graph=True) for c in classifiers]  
-    else:  
+    # Add distributed check to avoid DDP crash when running concurrent jobs
+    from torch import distributed as dist
+    use_ddp = dist.is_available() and dist.is_initialized() and world_size > 1
+    if use_ddp:
+        classifiers = [DistributedDataParallel(c, static_graph=True) for c in classifiers]
+    else:
         logger.info(f"DDP disabled (world_size={world_size}); running single-process.")
-        
+
     print(classifiers[0])
 
     train_loader, train_sampler = make_dataloader(
@@ -405,7 +417,7 @@ def main(args_eval, resume_preempt=False):
     def save_checkpoint(epoch, mean_val_acc, best_val_acc,
                         val_heads, best_per_head, mean_per_head, min_per_head, best_epoch_per_head,
                         is_best=False):  # <--- ADD THIS PARAMETER
-        
+
         all_classifier_dicts = [c.state_dict() for c in classifiers]
         all_opt_dicts = [o.state_dict() for o in optimizer]
 
@@ -425,7 +437,7 @@ def main(args_eval, resume_preempt=False):
             "best_epoch_per_head": np.asarray(best_epoch_per_head, dtype=int).tolist(),
             "opt_grid": opt_kwargs,
         }
-        
+
         if rank == 0:
             # 1. Always save latest
             _latest_path = os.path.join(folder, "latest.pt")
@@ -434,7 +446,7 @@ def main(args_eval, resume_preempt=False):
             # 2. Save per-epoch snapshot
             epoch_path = os.path.join(folder, f"epoch_{epoch:03d}.pt")
             torch.save(save_dict, epoch_path)
-            
+
             # 3. --- NEW: Save BEST checkpoint ---
             if is_best:
                 best_path = os.path.join(folder, "best.pt")
@@ -447,7 +459,7 @@ def main(args_eval, resume_preempt=False):
     min_per_head = None
     best_epoch_per_head = None
     count_epochs = 0
-    
+
     # [FIX 3] Initialize Best Scalar based on Task
     if task_type == "regression":
         best_val_acc_scalar = float('inf')
@@ -457,7 +469,7 @@ def main(args_eval, resume_preempt=False):
     # TRAIN LOOP
     val_cnt = 0
     val_sum_scalar = 0.0
-    
+
     for epoch in range(start_epoch, num_epochs):
         logger.info("Epoch %d" % (epoch + 1))
         train_sampler.set_epoch(epoch)
@@ -507,7 +519,7 @@ def main(args_eval, resume_preempt=False):
         val_cnt += 1
         val_sum_scalar += float(val_acc_scalar)
         mean_val_acc_scalar = val_sum_scalar / val_cnt
-        
+
         # --- NEW: Logic for determining "Best" ---
         is_best = False
         if task_type == "regression":
@@ -532,22 +544,22 @@ def main(args_eval, resume_preempt=False):
         else:
             # For per-head, we need similar conditional logic for "improved"
             if task_type == "regression":
-                improved = val_heads < best_per_head # Lower is better
+                improved = val_heads < best_per_head  # Lower is better
                 best_per_head = np.minimum(best_per_head, val_heads)
             else:
-                improved = val_heads > best_per_head # Higher is better
+                improved = val_heads > best_per_head  # Higher is better
                 best_per_head = np.maximum(best_per_head, val_heads)
-                
+
             best_epoch_per_head[improved] = epoch + 1
             sum_per_head += val_heads
             min_per_head = np.minimum(min_per_head, val_heads)
-            
+
         mean_per_head = sum_per_head / count_epochs
 
         # Log appropriate metric name
         metric_label = "MAE" if task_type == "regression" else "Acc"
         symbol = "" if task_type == "regression" else "%"
-        
+
         val_label = "val(min-head)" if task_type == "regression" else "val(max-head)"
         logger.info("[%5d] train: %.3f%s  %s: %.3f%s (Best: %.3f%s)" % (
             epoch + 1, train_acc_scalar, symbol,
@@ -555,11 +567,21 @@ def main(args_eval, resume_preempt=False):
             best_val_acc_scalar, symbol
         ))
 
-        
         if rank == 0:
             csv_logger.log(epoch + 1, train_acc_scalar, val_acc_scalar)
 
+            # <--- WANDB LOGGING ADDED HERE --->
+            wandb.log({
+                f"train/{metric_label.lower()}": train_acc_scalar,
+                f"val/{metric_label.lower()}": val_acc_scalar,
+                f"val/best_{metric_label.lower()}": best_val_acc_scalar,
+                f"val/mean_{metric_label.lower()}": mean_val_acc_scalar
+            }, epoch + 1)
+
         if val_only:
+            # <--- WANDB CLEANUP FOR VAL ONLY --->
+            if rank == 0:
+                wandb.finish()
             return
 
         save_checkpoint(
@@ -574,28 +596,32 @@ def main(args_eval, resume_preempt=False):
             is_best=is_best,  # <--- PASS THE FLAG HERE
         )
 
+    # <--- WANDB CLEANUP FOR FULL TRAINING LOOP --->
+    if rank == 0:
+        wandb.finish()
+
 
 def run_one_epoch(
-    device,
-    training,
-    encoder,
-    classifiers,
-    scaler,
-    optimizer,
-    scheduler,
-    wd_scheduler,
-    data_loader,
-    use_bfloat16,
-    task_type="classification",  # "classification" or "regression"
-    use_focal_loss=False,
-    val_only=False,
-    predictions_save_path=None,
-    target_mean=None,
-    target_std=None,
+        device,
+        training,
+        encoder,
+        classifiers,
+        scaler,
+        optimizer,
+        scheduler,
+        wd_scheduler,
+        data_loader,
+        use_bfloat16,
+        task_type="classification",  # "classification" or "regression"
+        use_focal_loss=False,
+        val_only=False,
+        predictions_save_path=None,
+        target_mean=None,
+        target_std=None,
 ):
     # --- NEW: Import tqdm for progress bar ---
     from tqdm import tqdm
-    
+
     for c in classifiers:
         c.train(mode=training)
 
@@ -609,7 +635,7 @@ def run_one_epoch(
         else:
             criterion = torch.nn.CrossEntropyLoss()
         top1_meters = [AverageMeter() for _ in classifiers]
-    
+
     all_predictions = []
     all_video_paths = []
     all_labels = []
@@ -627,7 +653,7 @@ def run_one_epoch(
             [wds.step() for wds in wd_scheduler]
 
         with autocast("cuda", dtype=torch.bfloat16, enabled=use_bfloat16):
-        # with torch.cuda.amp.autocast(dtype=torch.float16, enabled=use_bfloat16):
+            # with torch.cuda.amp.autocast(dtype=torch.float16, enabled=use_bfloat16):
             # Load data and put on GPU
             clips = [
                 [dij.to(device, non_blocking=True) for dij in di]
@@ -636,7 +662,7 @@ def run_one_epoch(
             clip_indices = [d.to(device, non_blocking=True) for d in data[2]]
             labels = data[1].to(device)
             batch_size = len(labels)
-            
+
             video_paths = data[3] if len(data) > 3 else [f"video_{itr}_{i}" for i in range(batch_size)]
 
             # Forward and prediction
@@ -655,16 +681,16 @@ def run_one_epoch(
             losses = [[criterion(o.float(), labels) for o in coutputs] for coutputs in outputs]
         else:
             losses = [[criterion(o, labels) for o in coutputs] for coutputs in outputs]
-            
+
         # Compute metrics based on task type
         with torch.no_grad():
             if task_type == "regression":
                 outputs = [sum([o for o in coutputs]) / len(coutputs) for coutputs in outputs]
-                
+
                 # 1. Calculate Normalized MAE (Standard Deviations)
                 mae_errors = [F.l1_loss(o.squeeze().float(), labels.squeeze()) for o in outputs]
                 mae_errors = [float(AllReduce.apply(mae)) for mae in mae_errors]
-                
+
                 # 2. Convert to Real MAE for LOGGING
                 # --- CHANGE THIS BLOCK ---
                 t_std = target_std if target_std is not None else 1.0
@@ -678,7 +704,7 @@ def run_one_epoch(
                 top1_accs = [float(AllReduce.apply(t1a)) for t1a in top1_accs]
                 for t1m, t1a in zip(top1_meters, top1_accs):
                     t1m.update(t1a)
-                    
+
             if val_only and predictions_save_path is not None:
                 for i, pred in enumerate(outputs[0]):
                     all_predictions.append(pred.float().cpu().numpy())  # Convert to float32 first
@@ -690,17 +716,16 @@ def run_one_epoch(
             [o.step() for o in optimizer]
             [o.zero_grad() for o in optimizer]
 
-
         # Aggregate metrics for logging
         if task_type == "regression":
             _agg_metrics = np.array([m.avg for m in metric_meters])
-            metric_name = "MAE" 
+            metric_name = "MAE"
             metric_symbol = ""
         else:  # classification
             _agg_metrics = np.array([t1m.avg for t1m in top1_meters])
             metric_name = "Acc"
             metric_symbol = "%"
-            
+
         # Only log to text log periodically (keep tqdm clean)
         if itr % 10 == 0:
             if val_only:
@@ -714,43 +739,42 @@ def run_one_epoch(
                 best_scalar = float(_agg_metrics.min()) if task_type == "regression" else float(_agg_metrics.max())
                 msg = "[%5d] %.3f%s [mean %.3f%s] [mem: %.2e]" % (
                     itr, best_scalar, metric_symbol, _agg_metrics.mean(), metric_symbol,
-                    torch.cuda.max_memory_allocated() / 1024.0**2,
+                    torch.cuda.max_memory_allocated() / 1024.0 ** 2,
                 )
                 logger.info(msg)
-
 
     # Save predictions (Un-normalized)
     if val_only and predictions_save_path is not None and len(all_predictions) > 0:
         import pandas as pd
         import os
         os.makedirs(os.path.dirname(predictions_save_path), exist_ok=True)
-            
+
         if task_type == "regression":
             # For regression, save REAL values
             # 1. Get raw normalized predictions
             pred_values_norm = [pred[0] if len(pred.shape) > 0 else pred for pred in all_predictions]
-            
+
             # 2. Un-normalize logic for CSV
             # --- CHANGE THIS BLOCK ---
             t_mean = target_mean if target_mean is not None else 0.0
             t_std = target_std if target_std is not None else 1.0
-            
+
             # Convert arrays to scalars and un-normalize
             labels_real = []
             for l in all_labels:
                 val = l[0] if isinstance(l, (np.ndarray, list)) else l
                 labels_real.append((val * t_std) + t_mean)  # Use variables
-                
+
             preds_real = []
             for p in pred_values_norm:
                 val = p[0] if isinstance(p, (np.ndarray, list)) else p
-                preds_real.append((val * t_std) + t_mean)   # Use variables
+                preds_real.append((val * t_std) + t_mean)  # Use variables
 
             df = pd.DataFrame({
                 'video_path': all_video_paths,
                 'label_real': labels_real,
                 'pred_real': preds_real,
-                'abs_error': [abs(a-b) for a,b in zip(labels_real, preds_real)]
+                'abs_error': [abs(a - b) for a, b in zip(labels_real, preds_real)]
             })
         else:  # classification
             pred_classes = [np.argmax(pred) for pred in all_predictions]
@@ -761,14 +785,12 @@ def run_one_epoch(
                 'predicted_class': pred_classes,
                 'prediction_confidence': pred_probs
             })
-            
+
         df.to_csv(predictions_save_path, index=False)
         logger.info(f"Saved {len(all_predictions)} predictions to {predictions_save_path}")
 
     scalar = float(_agg_metrics.min()) if task_type == "regression" else float(_agg_metrics.max())
     return scalar, _agg_metrics
-
-
 
 
 def load_checkpoint(device, r_path, classifiers, opt, scaler, val_only=False):
@@ -845,22 +867,22 @@ DEFAULT_NORMALIZATION = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
 
 def make_dataloader(
-    root_path,
-    batch_size,
-    world_size,
-    rank,
-    dataset_type="VideoDataset",
-    img_size=224,
-    frames_per_clip=16,
-    frame_step=4,
-    num_segments=8,
-    eval_duration=None,
-    num_views_per_segment=1,
-    allow_segment_overlap=True,
-    training=False,
-    num_workers=12,
-    subset_file=None,
-    normalization=None,
+        root_path,
+        batch_size,
+        world_size,
+        rank,
+        dataset_type="VideoDataset",
+        img_size=224,
+        frames_per_clip=16,
+        frame_step=4,
+        num_segments=8,
+        eval_duration=None,
+        num_views_per_segment=1,
+        allow_segment_overlap=True,
+        training=False,
+        num_workers=12,
+        subset_file=None,
+        normalization=None,
 ):
     if normalization is None:
         normalization = DEFAULT_NORMALIZATION

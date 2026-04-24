@@ -1,6 +1,6 @@
 app: vjepa
 cpus_per_task: 32
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_224_2class
+folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_384_2class
 mem_per_gpu: 80G
 nodes: 1
 tasks_per_node: 1
@@ -8,7 +8,7 @@ num_workers: 8
 
 eval_name: video_classification_frozen
 resume_checkpoint: true
-tag: kuk-mr-400-attentive_probe-224-single_step-2class
+tag: kuk-mr-400-attentive_probe-384-single_step-2class
 
 experiment:
   classifier:
@@ -24,15 +24,15 @@ experiment:
     dataset_train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/train_2class.csv
     dataset_val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/val_2class.csv
 
-    num_classes: 2             # Or whatever your view count is
-    resolution: 224
+    num_classes: 4             # Or whatever your view count is
+    resolution: 384
     frames_per_clip: 32
     frame_step: 1
     num_segments: 4
     num_views_per_segment: 1
 
   optimization:
-    batch_size: 8
+    batch_size: 4
     num_epochs: 20
     use_bfloat16: true
     use_pos_embed: false
