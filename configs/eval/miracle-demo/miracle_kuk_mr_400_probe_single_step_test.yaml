@@ -1,6 +1,6 @@
 app: vjepa
 cpus_per_task: 32
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_224
+folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_224_test
 mem_per_gpu: 80G
 nodes: 1
 tasks_per_node: 1
@@ -8,7 +8,7 @@ num_workers: 8
 
 eval_name: video_classification_frozen
 resume_checkpoint: true
-tag: kuk-mr-400-attentive_probe-224-single_step
+tag: kuk-mr-400-attentive_probe-224-single_step_test
 
 experiment:
   classifier:
@@ -21,8 +21,8 @@ experiment:
     dataset_type: VideoDataset
     # Update these paths for your view classification data
     # For sample efficiency: create _1pct.csv, _10pct.csv variants
-    dataset_train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_4class.csv
-    dataset_val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/val_4class.csv
+    dataset_train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_val_4class.csv
+    dataset_val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/test_4class.csv
 
     num_classes: 4             # Or whatever your view count is
     resolution: 224
@@ -32,7 +32,7 @@ experiment:
     num_views_per_segment: 1
 
   optimization:
-    batch_size: 12
+    batch_size: 10
     num_epochs: 20
     use_bfloat16: true
     use_pos_embed: false

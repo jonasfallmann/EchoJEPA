@@ -20,6 +20,7 @@ except Exception:
 import logging
 import math
 import pprint
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -470,6 +471,13 @@ def main(args_eval, resume_preempt=False):
     val_cnt = 0
     val_sum_scalar = 0.0
 
+    # before training we print total number of model params and trainable params
+    logger.info("Model Summary:")
+    logger.info(f"Encoder: Total Params: {sum(p.numel() for p in encoder.parameters())}, Trainable Params: {sum(p.numel() for p in encoder.parameters() if p.requires_grad)}")
+    logger.info(f"Classifier Summary:")
+    for idx, clf in enumerate(classifiers):
+        logger.info(f"{clf.__class__.__name__} ({idx +1}): Total Params: {sum(p.numel() for p in clf.parameters())}, Trainable Params: {sum(p.numel() for p in clf.parameters() if p.requires_grad)}")
+
     for epoch in range(start_epoch, num_epochs):
         logger.info("Epoch %d" % (epoch + 1))
         train_sampler.set_epoch(epoch)
@@ -639,6 +647,11 @@ def run_one_epoch(
     all_predictions = []
     all_video_paths = []
     all_labels = []
+    all_patient_ids = []  # NEW: Store patient IDs
+
+    # For subject-level aggregation
+    subject_probs = defaultdict(list)
+    subject_targets = {}
 
     # --- NEW: Wrap loader in tqdm if val_only ---
     if val_only:
@@ -663,7 +676,10 @@ def run_one_epoch(
             labels = data[1].to(device)
             batch_size = len(labels)
 
-            video_paths = data[3] if len(data) > 3 else [f"video_{itr}_{i}" for i in range(batch_size)]
+            # NEW: Extract patient IDs (may be None for legacy datasets)
+            patient_ids = data[3] if len(data) > 3 else [None] * batch_size
+
+            video_paths = data[4] if len(data) > 4 else [f"video_{itr}_{i}" for i in range(batch_size)]
 
             # Forward and prediction
             with torch.no_grad():
@@ -700,6 +716,21 @@ def run_one_epoch(
                     meter.update(mae)
             else:  # classification
                 outputs = [sum([F.softmax(o, dim=1) for o in coutputs]) / len(coutputs) for coutputs in outputs]
+
+                # NEW: For non-training (val/test), aggregate by subject
+                if not training:
+                    # Accumulate predictions for subject-level aggregation
+                    # Store per-head probabilities for each sample so we can choose the best head later
+                    num_output_heads = len(outputs)
+                    # outputs is a list of tensors, one per head: outputs[h][i] -> prob tensor for sample i and head h
+                    for i, (label, subj_id) in enumerate(zip(labels, patient_ids)):
+                        if subj_id is None:
+                            continue
+                        per_sample_head_probs = [outputs[h][i].detach().cpu() for h in range(num_output_heads)]
+                        subject_probs[subj_id].append(per_sample_head_probs)
+                        subject_targets[subj_id] = label.item()
+
+                # Still compute video-level accuracy for logging
                 top1_accs = [100.0 * coutputs.max(dim=1).indices.eq(labels).sum() / batch_size for coutputs in outputs]
                 top1_accs = [float(AllReduce.apply(t1a)) for t1a in top1_accs]
                 for t1m, t1a in zip(top1_meters, top1_accs):
@@ -710,6 +741,7 @@ def run_one_epoch(
                     all_predictions.append(pred.float().cpu().numpy())  # Convert to float32 first
                     all_video_paths.append(video_paths[i])
                     all_labels.append(labels[i].float().cpu().numpy())  # Also convert labels
+                    all_patient_ids.append(patient_ids[i])  # NEW: Store patient_id
 
         if training:
             [[lij.backward() for lij in li] for li in losses]
@@ -783,11 +815,35 @@ def run_one_epoch(
                 'video_path': all_video_paths,
                 'true_label': all_labels,
                 'predicted_class': pred_classes,
-                'prediction_confidence': pred_probs
+                'prediction_confidence': pred_probs,
+                'patient_id': all_patient_ids  # NEW: Add patient_id to dataframe
             })
 
         df.to_csv(predictions_save_path, index=False)
         logger.info(f"Saved {len(all_predictions)} predictions to {predictions_save_path}")
+
+    # NEW: Compute subject-level accuracy if in non-training (val/test) mode
+    if not training and task_type == "classification" and subject_probs:
+        subj_preds = []
+        subj_targets_list = []
+
+        # Choose the best head based on video-level validation metrics (_agg_metrics holds per-head accuracies)
+        try:
+            best_head_idx = int(np.argmax(_agg_metrics)) if len(_agg_metrics) > 0 else 0
+        except Exception:
+            best_head_idx = 0
+
+        for subj_id, probs_list in subject_probs.items():
+            # probs_list is a list over samples for this subject; each element is a list of per-head prob tensors
+            # Collect probabilities for the selected best head across all samples for this subject
+            head_probs = [sample_probs[best_head_idx] for sample_probs in probs_list]
+            avg_prob = torch.stack(head_probs).mean(dim=0)
+            subj_preds.append(torch.argmax(avg_prob).item())
+            subj_targets_list.append(subject_targets[subj_id])
+
+        subject_level_acc = np.mean([p == t for p, t in zip(subj_preds, subj_targets_list)]) * 100
+        logger.info(f"Subject-level accuracy (head {best_head_idx}): {subject_level_acc:.2f}%")
+        _agg_metrics = np.array([subject_level_acc] + [_agg_metrics.max() if len(_agg_metrics) > 0 else subject_level_acc])
 
     scalar = float(_agg_metrics.min()) if task_type == "regression" else float(_agg_metrics.max())
     return scalar, _agg_metrics
