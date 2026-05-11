@@ -489,6 +489,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Also save video-level predictions to CSV",
     )
+    parser.add_argument(
+        "--report_averages",
+        default="micro,macro,weighted",
+        help="Comma-separated summary rows to include in the saved tables (micro, macro, weighted, or all).",
+    )
 
     args = parser.parse_args()
     main(args)
