@@ -164,18 +164,23 @@ def run_inference(
         subject_preds, subject_targets, video_data (dict with predictions per video)
     """
     encoder.eval()
-    classifier = classifiers[best_head_idx]  # Use the best head
+    if best_head_idx < 0 or best_head_idx >= len(classifiers):
+        logger.warning(
+            "best_head_idx=%d is out of bounds for %d classifier head(s). Falling back to head 0.",
+            best_head_idx,
+            len(classifiers),
+        )
+        chosen_head = 0
+    else:
+        chosen_head = best_head_idx
+
+    classifier = classifiers[chosen_head]  # Fixed head chosen from train/val checkpoint metadata
     classifier.eval()
 
-    # For subject-level aggregation we will collect per-sample per-head probabilities
+    # For subject-level aggregation we collect per-sample probabilities from the chosen head.
     subject_probs = defaultdict(list)
     subject_targets = {}
     video_data = []
-    # Store per-sample per-head probs so we can compute video-level per-head metrics
-    all_sample_head_probs = []  # list of lists: for each sample -> [prob_head0 (np), prob_head1 (np), ...]
-    all_labels = []
-    all_patient_ids = []
-    all_video_paths = []
     subject_aggregation_logged = False
     samples_with_patient_id = 0
     samples_without_patient_id = 0
@@ -208,38 +213,24 @@ def run_inference(
             # Forward pass: get encoder outputs (list over clips or a single tensor)
             outputs = encoder(clips, clip_indices)
 
-            # For consistency with eval.py, apply each classifier to each clip embedding, then
-            # average probabilities across clips (i.e. classifier called per-clip, then aggregate)
-            # Handle case where encoder returns a single tensor per batch (no clip-list)
-            # Build per-head list of logits per clip: per_head_logits[head_idx] = [logits_clip0, logits_clip1, ...]
-            per_head_logits = []
+            # For consistency with eval.py, apply classifier per clip embedding then
+            # average probabilities across clips.
             if isinstance(outputs, list):
-                # outputs: list of clip embeddings (each tensor shape [B, embed_dim])
-                for clf in classifiers:
-                    per_clip_logits = [clf(o) for o in outputs]
-                    per_head_logits.append(per_clip_logits)
+                per_clip_logits = [classifier(o) for o in outputs]
             else:
-                # outputs is a single tensor: treat as one "clip"
-                for clf in classifiers:
-                    per_head_logits.append([clf(outputs)])
+                per_clip_logits = [classifier(outputs)]
 
-            # Convert per-head logits -> per-head averaged probabilities (over clips)
-            per_head_probs = []  # list of tensors shape [B, num_classes]
-            for coutputs in per_head_logits:
-                probs_per_clip = [F.softmax(o, dim=1) for o in coutputs]
-                avg_probs = sum(probs_per_clip) / len(probs_per_clip)
-                per_head_probs.append(avg_probs)
+            probs_per_clip = [F.softmax(o, dim=1) for o in per_clip_logits]
+            avg_probs = sum(probs_per_clip) / len(probs_per_clip)
 
-            # Record per-sample, per-head probabilities and labels for later selection of best head
             batch_size = labels.size(0)
             for i in range(batch_size):
-                sample_head_probs = [p[i].detach().cpu().numpy() for p in per_head_probs]
-                all_sample_head_probs.append(sample_head_probs)
-                all_labels.append(labels[i].cpu().item())
+                probs_chosen = avg_probs[i].detach().cpu().numpy()
                 pid = patient_ids[i] if i < len(patient_ids) else None
-                all_patient_ids.append(pid)
                 vp = video_paths[i] if i < len(video_paths) else f"video_{batch_idx}_{i}"
-                all_video_paths.append(vp)
+
+                pred = int(np.argmax(probs_chosen))
+                conf = float(np.max(probs_chosen))
 
                 has_patient_id = _has_patient_id(pid)
                 if has_patient_id:
@@ -251,10 +242,14 @@ def run_inference(
                 video_data.append({
                     'video_path': vp,
                     'true_label': labels[i].cpu().item(),
-                    'predicted_label': None,
-                    'confidence': None,
+                    'predicted_label': pred,
+                    'confidence': conf,
                     'patient_id': pid,
                 })
+
+                if has_patient_id:
+                    subject_probs[pid].append(probs_chosen)
+                    subject_targets[pid] = labels[i].cpu().item()
 
             if (batch_idx + 1) % 10 == 0:
                 logger.info(f"Processed {(batch_idx + 1) * len(labels)} samples")
@@ -265,42 +260,13 @@ def run_inference(
         samples_without_patient_id,
     )
 
-    # If we have collected per-sample per-head probabilities, choose best head based on video-level accuracy
     subject_preds = []
     subject_targets_list = []
     subject_ids_list = []
-
-    num_heads = len(classifiers)
-    per_head_acc = []
-    if len(all_sample_head_probs) > 0:
-        # Compute per-head video-level accuracy
-        for h in range(num_heads):
-            preds_h = [int(np.argmax(sample[h])) for sample in all_sample_head_probs]
-            acc_h = float(np.mean([p == t for p, t in zip(preds_h, all_labels)])) if len(all_labels) > 0 else 0.0
-            per_head_acc.append(acc_h)
-
-        try:
-            chosen_head = int(np.argmax(per_head_acc))
-        except Exception:
-            chosen_head = best_head_idx if best_head_idx < num_heads else 0
-    else:
-        chosen_head = best_head_idx if best_head_idx < num_heads else 0
-
-    logger.info(f"Selected head for aggregation: {chosen_head} (per-head video accs: {per_head_acc})")
-
-    # Fill video-level predictions using the chosen head and build subject-level collections
-    for idx, (sample_probs_per_head, label, pid, vp) in enumerate(
-        zip(all_sample_head_probs, all_labels, all_patient_ids, all_video_paths)
-    ):
-        probs_chosen = sample_probs_per_head[chosen_head]
-        pred = int(np.argmax(probs_chosen))
-        conf = float(np.max(probs_chosen))
-        video_data[idx]["predicted_label"] = pred
-        video_data[idx]["confidence"] = conf
-
-        if _has_patient_id(pid):
-            subject_probs[pid].append(probs_chosen)
-            subject_targets[pid] = label
+    logger.info(
+        "Using fixed classifier head %d selected from training/validation checkpoint metadata.",
+        chosen_head,
+    )
 
     logger.info(
         "Subject-level aggregation %s: %d subjects collected from %d video samples.",
