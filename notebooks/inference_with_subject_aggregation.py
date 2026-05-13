@@ -342,6 +342,8 @@ def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None):
         cmap='Blues',
         xticklabels=class_names,
         yticklabels=class_names,
+        vmax=17,
+        vmin=0
     )
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')

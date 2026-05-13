@@ -22,4 +22,4 @@ model_data/
 
 *.png
 .idea
-final_eval
+results
