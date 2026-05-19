@@ -90,6 +90,7 @@ def init_data(
             rank=rank,
             deterministic=deterministic,
             log_dir=log_dir,
+            drop_last=drop_last,
         )
 
     elif data.lower() == "videogroupdataset":  

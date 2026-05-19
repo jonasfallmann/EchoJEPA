@@ -22,7 +22,12 @@ import torch.nn.functional as F
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 
 from evals.video_classification_frozen.eval import make_dataloader
 
@@ -39,6 +44,194 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEFAULT_NORMALIZATION = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
+
+def _safe_divide(numerator, denominator):
+    return float(numerator / denominator) if denominator else 0.0
+
+
+def parse_average_modes(report_averages):
+    """Parse the aggregation modes to include in summary tables."""
+    if not report_averages:
+        return ["micro", "macro", "weighted"]
+
+    tokens = [token.strip().lower() for token in report_averages.split(",") if token.strip()]
+    if "all" in tokens:
+        return ["micro", "macro", "weighted"]
+
+    valid_tokens = []
+    for token in tokens:
+        if token in {"micro", "macro", "weighted"} and token not in valid_tokens:
+            valid_tokens.append(token)
+
+    return valid_tokens or ["micro", "macro", "weighted"]
+
+
+def collapse_clinical_significant(labels):
+    """Collapse labels 0/1 vs 2/3 into a clinical-significant binary target."""
+    labels = np.asarray(labels)
+    return np.where(np.isin(labels, [2, 3]), 1, 0).astype(int)
+
+
+def build_metric_tables(y_true, y_pred, class_names, average_modes=None):
+    """Build per-class and aggregate metric tables for a task."""
+    average_modes = average_modes or ["micro", "macro", "weighted"]
+    labels = list(range(len(class_names)))
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    total = int(cm.sum())
+    supports = cm.sum(axis=1)
+
+    per_class_rows = []
+    for idx, class_name in enumerate(class_names):
+        tp = int(cm[idx, idx])
+        fn = int(cm[idx, :].sum() - tp)
+        fp = int(cm[:, idx].sum() - tp)
+        tn = int(total - tp - fn - fp)
+
+        precision = _safe_divide(tp, tp + fp)
+        recall = _safe_divide(tp, tp + fn)
+        specificity = _safe_divide(tn, tn + fp)
+        f1_score = _safe_divide(2 * precision * recall, precision + recall)
+
+        per_class_rows.append(
+            {
+                "class_index": idx,
+                "class_name": class_name,
+                "precision": precision,
+                "recall": recall,
+                "sensitivity": recall,
+                "f1_score": f1_score,
+                "specificity": specificity,
+                "support": int(supports[idx]),
+            }
+        )
+
+    per_class_df = pd.DataFrame(per_class_rows)
+
+    summary_rows = []
+    for avg in average_modes:
+        precision, recall, f1_score, _ = precision_recall_fscore_support(
+            y_true,
+            y_pred,
+            labels=labels,
+            average=avg,
+            zero_division=0,
+        )
+        if avg == "micro":
+            specificity = np.nan
+        elif avg == "macro":
+            specificity = float(per_class_df["specificity"].mean()) if not per_class_df.empty else np.nan
+        else:  # weighted
+            specificity = float(np.average(per_class_df["specificity"], weights=per_class_df["support"])) if total else np.nan
+
+        summary_rows.append(
+            {
+                "aggregation": avg,
+                "precision": float(precision),
+                "recall": float(recall),
+                "sensitivity": float(recall),
+                "f1_score": float(f1_score),
+                "specificity": specificity,
+                "accuracy": float(accuracy_score(y_true, y_pred)) if total else np.nan,
+                "support": total,
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    return per_class_df, summary_df, cm
+
+
+def plot_metric_bars(per_class_df, title, output_path=None):
+    """Plot per-class metric bars for precision/recall/F1/specificity."""
+    if per_class_df.empty:
+        logger.warning("Skipping metric plot for %s because no rows were available.", title)
+        return
+
+    plot_df = per_class_df.melt(
+        id_vars=["class_name"],
+        value_vars=["precision", "recall", "f1_score", "specificity"],
+        var_name="metric",
+        value_name="value",
+    )
+
+    metric_name_map = {
+        "precision": "Precision",
+        "recall": "Recall / Sensitivity",
+        "f1_score": "F1-score",
+        "specificity": "Specificity",
+    }
+    plot_df["metric"] = plot_df["metric"].map(metric_name_map)
+
+    plt.figure(figsize=(max(10, int(len(per_class_df) * 1.4)), 6))
+    sns.barplot(data=plot_df, x="class_name", y="value", hue="metric")
+    plt.ylim(0.0, 1.0)
+    plt.ylabel("Score")
+    plt.xlabel("Class")
+    plt.title(title)
+    plt.legend(title="Metric", loc="lower right")
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        logger.info("Saved metric plot to %s", output_path)
+
+    plt.close()
+
+
+def report_metrics(task_name, y_true, y_pred, class_names, output_dir=None, report_averages=None):
+    """Compute, log, and optionally save metrics for a task."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if y_true.size == 0 or y_pred.size == 0:
+        logger.warning("Skipping %s report because no predictions were available.", task_name)
+        return None
+
+    average_modes = report_averages or ["micro", "macro", "weighted"]
+    per_class_df, summary_df, cm = build_metric_tables(y_true, y_pred, class_names, average_modes=average_modes)
+    labels = list(range(len(class_names)))
+
+    logger.info("\n%s", "=" * 50)
+    logger.info("%s", task_name.upper())
+    logger.info("%s", "=" * 50)
+    logger.info("Accuracy: %.2f%%", accuracy_score(y_true, y_pred) * 100)
+    logger.info("\nClassification Report:\n%s", classification_report(
+        y_true,
+        y_pred,
+        labels=labels,
+        target_names=class_names,
+        zero_division=0,
+    ))
+    logger.info("\nPer-class metrics:\n%s", per_class_df.to_string(index=False))
+    logger.info("\nAggregate metrics:\n%s", summary_df.to_string(index=False))
+
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prefix = task_name.lower().replace(" ", "_")
+
+        per_class_path = output_dir / f"{prefix}_per_class_metrics.csv"
+        summary_path = output_dir / f"{prefix}_summary_metrics.csv"
+        plot_path = output_dir / f"{prefix}_metric_bars.png"
+        cm_path = output_dir / ("confusion_matrix.png" if prefix == "subject_4way" else f"confusion_matrix_{prefix}.png")
+
+        per_class_df.to_csv(per_class_path, index=False)
+        summary_df.to_csv(summary_path, index=False)
+        logger.info("Saved per-class metrics to %s", per_class_path)
+        logger.info("Saved summary metrics to %s", summary_path)
+
+        plot_metric_bars(per_class_df, f"{task_name} Metrics", plot_path)
+        plot_confusion_matrix(y_true, y_pred, class_names=class_names, output_path=cm_path, labels=labels)
+
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "per_class_df": per_class_df,
+        "summary_df": summary_df,
+        "confusion_matrix": cm,
+    }
 
 
 class InferenceConfig:
@@ -164,23 +357,18 @@ def run_inference(
         subject_preds, subject_targets, video_data (dict with predictions per video)
     """
     encoder.eval()
-    if best_head_idx < 0 or best_head_idx >= len(classifiers):
-        logger.warning(
-            "best_head_idx=%d is out of bounds for %d classifier head(s). Falling back to head 0.",
-            best_head_idx,
-            len(classifiers),
-        )
-        chosen_head = 0
-    else:
-        chosen_head = best_head_idx
-
-    classifier = classifiers[chosen_head]  # Fixed head chosen from train/val checkpoint metadata
+    classifier = classifiers[best_head_idx]  # Use the best head
     classifier.eval()
 
-    # For subject-level aggregation we collect per-sample probabilities from the chosen head.
+    # For subject-level aggregation we will collect per-sample per-head probabilities
     subject_probs = defaultdict(list)
     subject_targets = {}
     video_data = []
+    # Store per-sample per-head probs so we can compute video-level per-head metrics
+    all_sample_head_probs = []  # list of lists: for each sample -> [prob_head0 (np), prob_head1 (np), ...]
+    all_labels = []
+    all_patient_ids = []
+    all_video_paths = []
     subject_aggregation_logged = False
     samples_with_patient_id = 0
     samples_without_patient_id = 0
@@ -213,24 +401,38 @@ def run_inference(
             # Forward pass: get encoder outputs (list over clips or a single tensor)
             outputs = encoder(clips, clip_indices)
 
-            # For consistency with eval.py, apply classifier per clip embedding then
-            # average probabilities across clips.
+            # For consistency with eval.py, apply each classifier to each clip embedding, then
+            # average probabilities across clips (i.e. classifier called per-clip, then aggregate)
+            # Handle case where encoder returns a single tensor per batch (no clip-list)
+            # Build per-head list of logits per clip: per_head_logits[head_idx] = [logits_clip0, logits_clip1, ...]
+            per_head_logits = []
             if isinstance(outputs, list):
-                per_clip_logits = [classifier(o) for o in outputs]
+                # outputs: list of clip embeddings (each tensor shape [B, embed_dim])
+                for clf in classifiers:
+                    per_clip_logits = [clf(o) for o in outputs]
+                    per_head_logits.append(per_clip_logits)
             else:
-                per_clip_logits = [classifier(outputs)]
+                # outputs is a single tensor: treat as one "clip"
+                for clf in classifiers:
+                    per_head_logits.append([clf(outputs)])
 
-            probs_per_clip = [F.softmax(o, dim=1) for o in per_clip_logits]
-            avg_probs = sum(probs_per_clip) / len(probs_per_clip)
+            # Convert per-head logits -> per-head averaged probabilities (over clips)
+            per_head_probs = []  # list of tensors shape [B, num_classes]
+            for coutputs in per_head_logits:
+                probs_per_clip = [F.softmax(o, dim=1) for o in coutputs]
+                avg_probs = sum(probs_per_clip) / len(probs_per_clip)
+                per_head_probs.append(avg_probs)
 
+            # Record per-sample, per-head probabilities and labels for later selection of best head
             batch_size = labels.size(0)
             for i in range(batch_size):
-                probs_chosen = avg_probs[i].detach().cpu().numpy()
+                sample_head_probs = [p[i].detach().cpu().numpy() for p in per_head_probs]
+                all_sample_head_probs.append(sample_head_probs)
+                all_labels.append(labels[i].cpu().item())
                 pid = patient_ids[i] if i < len(patient_ids) else None
+                all_patient_ids.append(pid)
                 vp = video_paths[i] if i < len(video_paths) else f"video_{batch_idx}_{i}"
-
-                pred = int(np.argmax(probs_chosen))
-                conf = float(np.max(probs_chosen))
+                all_video_paths.append(vp)
 
                 has_patient_id = _has_patient_id(pid)
                 if has_patient_id:
@@ -242,14 +444,10 @@ def run_inference(
                 video_data.append({
                     'video_path': vp,
                     'true_label': labels[i].cpu().item(),
-                    'predicted_label': pred,
-                    'confidence': conf,
+                    'predicted_label': None,
+                    'confidence': None,
                     'patient_id': pid,
                 })
-
-                if has_patient_id:
-                    subject_probs[pid].append(probs_chosen)
-                    subject_targets[pid] = labels[i].cpu().item()
 
             if (batch_idx + 1) % 10 == 0:
                 logger.info(f"Processed {(batch_idx + 1) * len(labels)} samples")
@@ -260,13 +458,42 @@ def run_inference(
         samples_without_patient_id,
     )
 
+    # If we have collected per-sample per-head probabilities, choose best head based on video-level accuracy
     subject_preds = []
     subject_targets_list = []
     subject_ids_list = []
-    logger.info(
-        "Using fixed classifier head %d selected from training/validation checkpoint metadata.",
-        chosen_head,
-    )
+
+    num_heads = len(classifiers)
+    per_head_acc = []
+    if len(all_sample_head_probs) > 0:
+        # Compute per-head video-level accuracy
+        for h in range(num_heads):
+            preds_h = [int(np.argmax(sample[h])) for sample in all_sample_head_probs]
+            acc_h = float(np.mean([p == t for p, t in zip(preds_h, all_labels)])) if len(all_labels) > 0 else 0.0
+            per_head_acc.append(acc_h)
+
+        try:
+            chosen_head = int(np.argmax(per_head_acc))
+        except Exception:
+            chosen_head = best_head_idx if best_head_idx < num_heads else 0
+    else:
+        chosen_head = best_head_idx if best_head_idx < num_heads else 0
+
+    logger.info(f"Selected head for aggregation: {chosen_head} (per-head video accs: {per_head_acc})")
+
+    # Fill video-level predictions using the chosen head and build subject-level collections
+    for idx, (sample_probs_per_head, label, pid, vp) in enumerate(
+        zip(all_sample_head_probs, all_labels, all_patient_ids, all_video_paths)
+    ):
+        probs_chosen = sample_probs_per_head[chosen_head]
+        pred = int(np.argmax(probs_chosen))
+        conf = float(np.max(probs_chosen))
+        video_data[idx]["predicted_label"] = pred
+        video_data[idx]["confidence"] = conf
+
+        if _has_patient_id(pid):
+            subject_probs[pid].append(probs_chosen)
+            subject_targets[pid] = label
 
     logger.info(
         "Subject-level aggregation %s: %d subjects collected from %d video samples.",
@@ -288,7 +515,7 @@ def run_inference(
     return np.array(subject_preds), np.array(subject_targets_list), video_data, subject_ids_list
 
 
-def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None):
+def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None, labels=None):
     """
     Create and save confusion matrix plot.
 
@@ -298,7 +525,7 @@ def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None):
         class_names: List of class names
         output_path: Path to save the plot
     """
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
 
     plt.figure(figsize=(10, 8))
     sns.heatmap(
@@ -308,8 +535,6 @@ def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None):
         cmap='Blues',
         xticklabels=class_names,
         yticklabels=class_names,
-        vmax=17,
-        vmin=0
     )
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
@@ -320,7 +545,7 @@ def plot_confusion_matrix(y_true, y_pred, class_names=None, output_path=None):
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         logger.info(f"Saved confusion matrix to {output_path}")
 
-    plt.show()
+    plt.close()
 
 
 def main(args):
@@ -380,40 +605,102 @@ def main(args):
         num_classes,
     )
 
+    report_averages = parse_average_modes(args.report_averages)
+
+    # Fall back to video-level predictions if no subject IDs were available.
+    evaluation_level = "subject-level"
+    eval_true = np.asarray(subject_targets)
+    eval_pred = np.asarray(subject_preds)
+    eval_ids = list(subject_ids)
+    if eval_true.size == 0 or eval_pred.size == 0:
+        logger.warning(
+            "No subject-level predictions were available; falling back to video-level reporting."
+        )
+        evaluation_level = "video-level fallback"
+        eval_true = np.asarray([item["true_label"] for item in video_data])
+        eval_pred = np.asarray([item["predicted_label"] for item in video_data])
+        eval_ids = [item["video_path"] for item in video_data]
+
+    if eval_true.size == 0 or eval_pred.size == 0:
+        logger.error("No evaluation samples were available after inference.")
+        return np.nan
+
     # Report metrics
     logger.info("\n" + "="*50)
-    logger.info("SUBJECT-LEVEL RESULTS")
+    logger.info("SUBJECT-LEVEL RESULTS (%s)", evaluation_level)
     logger.info("="*50)
 
-    subject_acc = accuracy_score(subject_targets, subject_preds)
+    subject_acc = accuracy_score(eval_true, eval_pred)
     logger.info(f"Subject-level Accuracy: {subject_acc * 100:.2f}%")
-    logger.info(f"Number of subjects: {len(subject_preds)}")
+    logger.info(f"Number of evaluated samples: {len(eval_pred)}")
 
-    # Classification report
+    if num_classes is None:
+        num_classes = int(max(np.max(eval_true), np.max(eval_pred)) + 1)
+
     class_names = [f"Class {i}" for i in range(num_classes)]
-    logger.info("\nClassification Report:")
-    logger.info(classification_report(subject_targets, subject_preds, target_names=class_names))
+    report_metrics(
+        task_name="subject_4way",
+        y_true=eval_true,
+        y_pred=eval_pred,
+        class_names=class_names,
+        output_dir=args.output_dir,
+        report_averages=report_averages,
+    )
+
+    if num_classes == 4:
+        binary_true = collapse_clinical_significant(eval_true)
+        binary_pred = collapse_clinical_significant(eval_pred)
+        binary_class_names = ["Not clinically significant (0/1)", "Clinical significant (2/3)"]
+
+        report_metrics(
+            task_name="clinical_significant_binary",
+            y_true=binary_true,
+            y_pred=binary_pred,
+            class_names=binary_class_names,
+            output_dir=args.output_dir,
+            report_averages=report_averages,
+        )
+    else:
+        logger.warning(
+            "Skipping clinical-significant binary report because num_classes=%s (expected 4 classes).",
+            num_classes,
+        )
+
+    logger.info(
+        "Reporting guidance: use per-class rows to inspect class-specific behavior, macro averages as the most balanced single summary, and weighted averages when prevalence should influence the table; for the clinical binary task, the class-1 sensitivity/recall and class-0 specificity are usually the most clinically meaningful numbers."
+    )
 
     # Save results
     if args.output_dir:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save confusion matrix
-        cm_path = output_dir / "confusion_matrix.png"
-        plot_confusion_matrix(subject_targets, subject_preds, class_names, cm_path)
-
         # Save predictions to CSV
         results_df = pd.DataFrame({
-            'subject_id': subject_ids,
-            'true_label': subject_targets,
-            'predicted_label': subject_preds,
-            'correct': subject_preds == subject_targets,
+            'subject_id': eval_ids,
+            'true_label': eval_true,
+            'predicted_label': eval_pred,
+            'correct': eval_pred == eval_true,
+            'evaluation_level': evaluation_level,
         })
 
         csv_path = output_dir / "subject_predictions.csv"
         results_df.to_csv(csv_path, index=False)
         logger.info(f"Saved subject predictions to {csv_path}")
+
+        if num_classes == 4:
+            binary_results_df = pd.DataFrame({
+                'subject_id': eval_ids,
+                'true_label_4way': eval_true,
+                'predicted_label_4way': eval_pred,
+                'true_label_binary': collapse_clinical_significant(eval_true),
+                'predicted_label_binary': collapse_clinical_significant(eval_pred),
+                'correct_binary': collapse_clinical_significant(eval_true) == collapse_clinical_significant(eval_pred),
+                'evaluation_level': evaluation_level,
+            })
+            binary_csv_path = output_dir / "subject_predictions_binary.csv"
+            binary_results_df.to_csv(binary_csv_path, index=False)
+            logger.info(f"Saved binary subject predictions to {binary_csv_path}")
 
         # Save video-level predictions if needed
         if args.save_video_level:
