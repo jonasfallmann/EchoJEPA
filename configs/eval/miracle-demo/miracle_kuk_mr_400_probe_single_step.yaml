@@ -116,3 +116,19 @@ model_kwargs:
   wrapper_kwargs:
     max_frames: 128
     use_pos_embed: false
+
+umap:
+  sets:
+    train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_4class.csv
+    val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/val_4class.csv
+    test:  /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/test_4class.csv
+
+  class_names:
+       - None / Trace
+       - Mild
+       - Moderate
+       - Severe
+
+  n_neighbors: 25      # optional (default 30)
+  min_dist: 0.1         # optional (default 0.1)
+  metric: cosine
