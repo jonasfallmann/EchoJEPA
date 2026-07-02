@@ -1,15 +1,15 @@
-# CLASSIFICATION CONFIG
+# NESTED 5-4 CROSS-VALIDATION CONFIG
 app: vjepa
-cpus_per_task: 4
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_finetune
+cpus_per_task: 32
+folder: /mnt/custom-file-systems/efs/fs-0049217cdf69186d7_fsap-0fa7145b64eaa046b/vjepa2/evals/vitg-384/crossval
 mem_per_gpu: 80G
 nodes: 1
-tasks_per_node: 1
+tasks_per_node: 8
 num_workers: 8
 
-eval_name: video_classification_frozen
-resume_checkpoint: true
-tag: miracle-classifier-echojepa-g-multi
+eval_name: video_classification_frozen_crossval
+resume_checkpoint: false
+tag: uhn22k-crossval-echojepa
 
 experiment:
   classifier:
@@ -18,20 +18,21 @@ experiment:
 
   data:
     dataset_type: VideoDataset
-    dataset_train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/train.csv
-    dataset_val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/val.csv
-    num_classes: 4
+    # CROSS-VALIDATION MODE (mutually exclusive with dataset_train/dataset_val):
+    dataset_crossval: /home/sagemaker-user/user-default-efs/vjepa2/data/csv/uhn_views_22k_crossval.csv
+    num_classes: 13
     resolution: 224
     frames_per_clip: 16
     
-    # SAMPLING (Optimized for Cardiac Cycle)
-    frame_step: 2           # ~1.28s context
-    num_segments: 2         # Efficient temporal coverage
+    # SAMPLING
+    frame_step: 2
+    num_segments: 2
     num_views_per_segment: 1
 
   optimization:  
     batch_size: 1  
-    # PRUNED REGRESSION GRID  
+    # Parameter grid: all configs are trained in parallel during inner CV;
+    # the best (by avg subject accuracy across 4 inner folds) is used for outer retraining.
     multihead_kwargs:  
     # --- Group 1: 1e-4 ---  
     - final_lr: 0.0  
@@ -71,22 +72,15 @@ experiment:
       lr: 0.00005  
       start_lr: 0.00005  
       warmup: 0.0  
-      weight_decay: 0.4
+      weight_decay: 0.4  
         
-    num_epochs: 20  
+    num_epochs: 20            # Epochs for outer retraining
+    inner_num_epochs: 10      # Epochs for inner CV (fewer → faster grid search)
     use_bfloat16: true  
-    use_pos_embed: false  
 
 model_kwargs:
-  # echo checkpoint
-  checkpoint: "/system/user/publicwork/fallmann/miracle/EchoJEPA/checkpoints/echojepa_vitg.pt"
-
-  # kinetics checkpoint
-  # checkpoint: "/mnt/custom-file-systems/efs/fs-0049217cdf69186d7_fsap-0fa7145b64eaa046b/vjepa2/checkpoints/vitg-384.pt"
-  
-  # module_name: evals.video_classification_frozen.modelcustom.vit_encoder_multiclip_multilevel
+  checkpoint: "/mnt/custom-file-systems/efs/fs-0049217cdf69186d7_fsap-0fa7145b64eaa046b/vjepa2/checkpoints/anneal/keep/pt-280-an81.pt"
   module_name: evals.video_classification_frozen.modelcustom.vit_encoder_multiclip
-  
   pretrain_kwargs:
     encoder:
       checkpoint_key: target_encoder
@@ -96,10 +90,6 @@ model_kwargs:
       tubelet_size: 2
       uniform_power: true
       use_rope: true
-      
   wrapper_kwargs:
     max_frames: 128
     use_pos_embed: false
-    # MULTI-LAYER EXTRACTION: Critical for motion tasks
-    # Assumes ViT-Giant (40 blocks). Adjust indices if using smaller model.
-    # out_layers: [24, 29, 34, 39] # use for multilevel

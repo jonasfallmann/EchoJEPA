@@ -1,14 +1,14 @@
 app: vjepa
 cpus_per_task: 32
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400_single_step_384_2class
+folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/crossval/vitl_attentive_probe_2class
 mem_per_gpu: 80G
 nodes: 1
 tasks_per_node: 1
 num_workers: 8
 
-eval_name: video_classification_frozen
+eval_name: video_classification_frozen_crossval
 resume_checkpoint: true
-tag: kuk-mr-400-attentive_probe-384-single_step-2class
+tag: vitl_attentive_probe_2class
 
 experiment:
   classifier:
@@ -21,19 +21,19 @@ experiment:
     dataset_type: VideoDataset
     # Update these paths for your view classification data
     # For sample efficiency: create _1pct.csv, _10pct.csv variants
-    dataset_train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/train_2class.csv
-    dataset_val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/val_2class.csv
+    dataset_crossval: /system/user/publicwork/fallmann/miracle/miracle/data/cv/dataset_2class_5fold.csv
 
-    num_classes: 4             # Or whatever your view count is
-    resolution: 384
+    num_classes: 2             # Or whatever your view count is
+    resolution: 224
     frames_per_clip: 32
     frame_step: 1
     num_segments: 4
     num_views_per_segment: 1
 
   optimization:
-    batch_size: 4
+    batch_size: 12
     num_epochs: 20
+    inner_num_epochs: 15
     use_bfloat16: true
     use_pos_embed: false
 
@@ -58,6 +58,12 @@ experiment:
       start_lr: 0.001
       warmup: 0.0
       weight_decay: 0.4
+    - final_lr: 0.0
+      final_weight_decay: 0.0001
+      lr: 0.001
+      start_lr: 0.001
+      warmup: 0.0
+      weight_decay: 0.0001
 
     # --- Group 2: 5e-4 ---
     - final_lr: 0.0
@@ -78,6 +84,12 @@ experiment:
       start_lr: 0.0005
       warmup: 0.0
       weight_decay: 0.4
+    - final_lr: 0.0
+      final_weight_decay: 0.0001
+      lr: 0.0005
+      start_lr: 0.0005
+      warmup: 0.0
+      weight_decay: 0.0001
 
     # --- Group 3: 1e-4 ---
     - final_lr: 0.0
@@ -98,16 +110,22 @@ experiment:
       start_lr: 0.0001
       warmup: 0.0
       weight_decay: 0.4
+    - final_lr: 0.0
+      final_weight_decay: 0.0001
+      lr: 0.0001
+      start_lr: 0.0001
+      warmup: 0.0
+      weight_decay: 0.0001
 
 model_kwargs:
-  checkpoint: "/system/user/publicwork/fallmann/miracle/EchoJEPA/checkpoints/echojepa_vitg.pt"
+  checkpoint: "/system/user/publicwork/fallmann/miracle/EchoJEPA/checkpoints/echojepa_vitl.pt"
   module_name: evals.video_classification_frozen.modelcustom.vit_encoder_multiclip
 
   pretrain_kwargs:
     encoder:
       checkpoint_key: target_encoder
       img_temporal_dim_size: null
-      model_name: vit_giant_xformers
+      model_name: vit_large
       patch_size: 16
       tubelet_size: 2
       uniform_power: true
@@ -116,3 +134,17 @@ model_kwargs:
   wrapper_kwargs:
     max_frames: 128
     use_pos_embed: false
+
+umap:
+  sets:
+    train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_2class.csv
+    val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/val_2class.csv
+    test:  /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/test_2class.csv
+
+  class_names:
+       - Absent
+       - Present
+
+  n_neighbors: 25      # optional (default 30)
+  min_dist: 0.1         # optional (default 0.1)
+  metric: cosine

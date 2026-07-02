@@ -191,7 +191,7 @@ def init_module(
     logger.info(f"Loading EchoPrime encoder weights: {encoder_ckpt}")
 
     # Build MViT exactly like upstream EchoPrime
-    echo_sd = torch.load(encoder_ckpt, map_location="cpu")
+    echo_sd = torch.load(encoder_ckpt, map_location="cpu", weights_only=False)
     echo_encoder = torchvision.models.video.mvit_v2_s()
     # EchoPrime modifies the head to output 512
     echo_encoder.head[-1] = nn.Linear(echo_encoder.head[-1].in_features, 512)

@@ -89,6 +89,61 @@ class FocalLoss(torch.nn.Module):
 
 # ------------------------------------
 
+
+def make_probe(task, probe, embed_dim, num_classes, num_targets, num_heads, depth, use_ln, dropout):
+    """Create a probe (classifier/regressor) module based on type.
+
+    Extracted to module level so it can be reused by cross-validation and
+    other evaluation pipelines.
+    """
+    if task == "regression":
+        if probe == "linear":
+            return LinearRegressor(
+                embed_dim=embed_dim,
+                num_targets=num_targets,
+                use_layernorm=use_ln,
+                dropout=dropout,
+            )
+        elif probe == "mlp":
+            return MLPRegressor(
+                embed_dim=embed_dim,
+                num_targets=num_targets,
+                use_layernorm=use_ln,
+                dropout=dropout,
+            )
+        else:  # attentive (default)
+            return AttentiveRegressor(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                depth=depth,
+                num_targets=num_targets,
+                use_activation_checkpointing=True,
+            )
+    else:  # classification
+        if probe == "linear":
+            return LinearClassifier(
+                embed_dim=embed_dim,
+                num_classes=num_classes,
+                use_layernorm=use_ln,
+                dropout=dropout,
+            )
+        elif probe == "mlp":
+            return MLPClassifier(
+                embed_dim=embed_dim,
+                num_classes=num_classes,
+                use_layernorm=use_ln,
+                dropout=dropout,
+            )
+        else:  # attentive (default)
+            return AttentiveClassifier(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                depth=depth,
+                num_classes=num_classes,
+                use_activation_checkpointing=True,
+            )
+
+
 def main(args_eval, resume_preempt=False):
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
@@ -271,54 +326,6 @@ def main(args_eval, resume_preempt=False):
     )
 
     # -- init classifier based on probe_type
-    def make_probe(task, probe, embed_dim, num_classes, num_targets, num_heads, depth, use_ln, dropout):
-        if task == "regression":
-            if probe == "linear":
-                return LinearRegressor(
-                    embed_dim=embed_dim,
-                    num_targets=num_targets,
-                    use_layernorm=use_ln,
-                    dropout=dropout,
-                )
-            elif probe == "mlp":
-                return MLPRegressor(
-                    embed_dim=embed_dim,
-                    num_targets=num_targets,
-                    use_layernorm=use_ln,
-                    dropout=dropout,
-                )
-            else:  # attentive (default)
-                return AttentiveRegressor(
-                    embed_dim=embed_dim,
-                    num_heads=num_heads,
-                    depth=depth,
-                    num_targets=num_targets,
-                    use_activation_checkpointing=True,
-                )
-        else:  # classification
-            if probe == "linear":
-                return LinearClassifier(
-                    embed_dim=embed_dim,
-                    num_classes=num_classes,
-                    use_layernorm=use_ln,
-                    dropout=dropout,
-                )
-            elif probe == "mlp":
-                return MLPClassifier(
-                    embed_dim=embed_dim,
-                    num_classes=num_classes,
-                    use_layernorm=use_ln,
-                    dropout=dropout,
-                )
-            else:  # attentive (default)
-                return AttentiveClassifier(
-                    embed_dim=embed_dim,
-                    num_heads=num_heads,
-                    depth=depth,
-                    num_classes=num_classes,
-                    use_activation_checkpointing=True,
-                )
-
     classifiers = [
         make_probe(
             task=task_type,
@@ -485,7 +492,7 @@ def main(args_eval, resume_preempt=False):
         if val_only:
             train_acc_scalar, _ = -1.0, None
         else:
-            train_acc_scalar, _ = run_one_epoch(
+            train_acc_scalar, _, _ = run_one_epoch(
                 device=device,
                 training=True,
                 encoder=encoder,
@@ -504,7 +511,7 @@ def main(args_eval, resume_preempt=False):
                 target_std=target_std,
             )
 
-        val_acc_scalar, val_heads = run_one_epoch(
+        val_acc_scalar, val_heads, _ = run_one_epoch(
             device=device,
             training=False,
             encoder=encoder,
@@ -626,6 +633,7 @@ def run_one_epoch(
         predictions_save_path=None,
         target_mean=None,
         target_std=None,
+        return_per_head_subject=False,
 ):
     # --- NEW: Import tqdm for progress bar ---
     from tqdm import tqdm
@@ -823,6 +831,7 @@ def run_one_epoch(
         logger.info(f"Saved {len(all_predictions)} predictions to {predictions_save_path}")
 
     # NEW: Compute subject-level accuracy if in non-training (val/test) mode
+    per_head_subject_accs = None
     if not training and task_type == "classification" and subject_probs:
         subj_preds = []
         subj_targets_list = []
@@ -845,8 +854,22 @@ def run_one_epoch(
         logger.info(f"Subject-level accuracy (head {best_head_idx}): {subject_level_acc:.2f}%")
         _agg_metrics = np.array([subject_level_acc] + [_agg_metrics.max() if len(_agg_metrics) > 0 else subject_level_acc])
 
+        # Compute per-head subject-level accuracy when requested (for nested CV)
+        if return_per_head_subject:
+            num_heads = len(classifiers)
+            per_head_subject_accs = []
+            for h in range(num_heads):
+                h_preds = []
+                for subj_id, probs_list in subject_probs.items():
+                    head_h_probs = [sample_probs[h] for sample_probs in probs_list]
+                    avg_h = torch.stack(head_h_probs).mean(dim=0)
+                    h_preds.append(torch.argmax(avg_h).item())
+                h_acc = np.mean([p == t for p, t in zip(h_preds, subj_targets_list)]) * 100
+                per_head_subject_accs.append(h_acc)
+            logger.info(f"Per-head subject accuracies: {[f'{a:.2f}' for a in per_head_subject_accs]}")
+
     scalar = float(_agg_metrics.min()) if task_type == "regression" else float(_agg_metrics.max())
-    return scalar, _agg_metrics
+    return scalar, _agg_metrics, per_head_subject_accs
 
 
 def load_checkpoint(device, r_path, classifiers, opt, scaler, val_only=False):
