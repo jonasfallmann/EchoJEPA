@@ -1,6 +1,6 @@
 app: vjepa
 cpus_per_task: 32
-folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/crossval/vitl_attentive_probe_4class
+folder: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/crossval/vitl_attentive_probe_2class_small
 mem_per_gpu: 80G
 nodes: 1
 tasks_per_node: 1
@@ -8,22 +8,22 @@ num_workers: 8
 
 eval_name: video_classification_frozen_crossval
 resume_checkpoint: true
-tag: vitl_attentive_probe_4class
+tag: vitl_attentive_probe_2class_small
 
 experiment:
   classifier:
     task_type: classification
     probe_type: attentive          # NEW: Specify probe type
     num_heads: 16               # Ignored for linear probe
-    num_probe_blocks: 4         # Ignored for linear probe
+    num_probe_blocks: 1         # Ignored for linear probe
 
   data:
     dataset_type: VideoDataset
     # Update these paths for your view classification data
     # For sample efficiency: create _1pct.csv, _10pct.csv variants
-    dataset_crossval: /system/user/publicwork/fallmann/miracle/miracle/data/cv/dataset_4class_5fold.csv
+    dataset_crossval: /system/user/publicwork/fallmann/miracle/miracle/data/cv/dataset_2class_5fold.csv
 
-    num_classes: 4             # Or whatever your view count is
+    num_classes: 2             # Or whatever your view count is
     resolution: 224
     frames_per_clip: 32
     frame_step: 1
@@ -32,8 +32,8 @@ experiment:
 
   optimization:
     batch_size: 12
-    num_epochs: 16
-    inner_num_epochs: 14
+    num_epochs: 15
+    inner_num_epochs: 12
     use_bfloat16: true
     use_pos_embed: false
 
@@ -137,15 +137,13 @@ model_kwargs:
 
 umap:
   sets:
-    train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_4class.csv
-    val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/val_4class.csv
-    test:  /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/test_4class.csv
+    train: /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/train_2class.csv
+    val:   /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/val_2class.csv
+    test:  /system/user/publicwork/fallmann/miracle/EchoJEPA/experiments/kuk_mr_400/server_echojepa_ptid/test_2class.csv
 
   class_names:
-       - None / Trace
-       - Mild
-       - Moderate
-       - Severe
+       - Absent
+       - Present
 
   n_neighbors: 25      # optional (default 30)
   min_dist: 0.1         # optional (default 0.1)

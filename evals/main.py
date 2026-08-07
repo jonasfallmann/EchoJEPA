@@ -41,6 +41,12 @@ parser.add_argument("--checkpoint", type=str, help="location of pretrained ckpt"
 parser.add_argument("--model_name", type=str, help="Model name")
 parser.add_argument("--batch_size", type=int)
 parser.add_argument("--use_fsdp", action="store_true")
+parser.add_argument(
+    "--fold",
+    type=int,
+    default=None,
+    help="Run only a specific outer fold (for cross-validation). Skips all other folds.",
+)
 
 
 def process_main(args, rank, fname, world_size, devices):
@@ -77,6 +83,8 @@ def process_main(args, rank, fname, world_size, devices):
         if args.override_config_folder:
             params["folder"] = args.folder
         params["use_fsdp"] = args.use_fsdp
+        if args.fold is not None:
+            params["outer_fold"] = args.fold
         logger.info("loaded params...")
 
     if rank == 0:

@@ -720,7 +720,18 @@ def main_crossval(args_eval, resume_preempt=False):
     logger.info(f"Loaded {len(cv_df)} samples with columns: {list(cv_df.columns)}")
 
     all_fold_ids = sorted(cv_df["fold_id"].unique())
-    if len(all_fold_ids) != 5:
+
+    # Optional: restrict to a single outer fold (e.g. --fold 4)
+    outer_fold_override = args_eval.get("outer_fold")
+    if outer_fold_override is not None:
+        if outer_fold_override not in all_fold_ids:
+            raise ValueError(
+                f"--fold {outer_fold_override} not found in crossval CSV. "
+                f"Available folds: {all_fold_ids}"
+            )
+        all_fold_ids = [outer_fold_override]
+        logger.info(f"Running single outer fold only: {outer_fold_override}")
+    elif len(all_fold_ids) != 5:
         raise ValueError(f"Expected 5 fold_ids in crossval CSV, got {len(all_fold_ids)}: {all_fold_ids}")
 
     logger.info(f"Fold IDs: {all_fold_ids}")
